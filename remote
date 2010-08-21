@@ -150,8 +150,14 @@ if [ "$?" = "3" ]; then
   echo "${USER} already exists on ${SERVER}"
 else
   echo "${USER} does not appear to exist yet on ${SERVER} ($?)"
-  ssh ${SERVER} "sudo /usr/sbin/useradd -m --password '${PW}' ${USER}" 
-  echo "Created account for ${USER}@${SERVER}, password set to '${PW}'"
+  $(ssh ${SERVER} "[[ -x /usr/sbin/adduser ]] && exit 42")
+  if [ "$?" = "42" ]; then
+    ssh ${SERVER} "sudo /usr/sbin/adduser --disabled-password ${USER}"
+    echo "Created account for ${USER}@${SERVER}, with disabled password"
+  else
+    ssh ${SERVER} "sudo /usr/sbin/useradd -m --password '${PW}' ${USER}" 
+    echo "Created account for ${USER}@${SERVER}, password set to '${PW}'"
+  fi
 fi
 
 if [ -f "${KEYDIR}/${USER}.pub" ]; then
