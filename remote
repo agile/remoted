@@ -1,169 +1,366 @@
 #!/bin/bash
 # 
 # Hack of a script to try and make it easier to manage users on remote servers
-#
-# TODO: easy way to add keys to alternate accounts? 
-#       maybe if the 3rd arg were "also" or something, 
-#       then we assume all args to follow to be alternate accts to add the key to
+# * you should already have an account set up and can sudo on the remote
+# * Users are created with disabled passwords where that is supported 
+#   (via adduser --disabled-password)
 #
 # TODO: handle command variations, eg: useradd, adduser, etc.. 
 #
 # TODO: default groups to add user to would be nice, too.. 
-#
 
 
-# Directory holding the pub keys, expecting them to be named <user>.pub
+# Default directory that should have the ssh pub keys
 KEYDIR=~/keys
-# Alternate accounts to check when disabling the user's keys
-ALTERNATE_ACCTS=(root) # deploy foo bar baz
-
-USER=$1
-SERVER=$2
-OPTIONAL=$3
-OPTIONAL_ARGS=$4 #$@:1 .. how to get $4 + anything thereafter.. know there's a way!
+# Used to back up files etc
 TIME=$(date +'%s')
+# When disabling accounts, will also check these (TODO: configurable option)
+ALTERNATE_ACCTS=(root)
 
-# Make this something interesting for a temporary password
-# or replace with your favorite password generator
-PW="Ch@ngeMe! ${RANDOM} ${USER}"
+# Determine if an account exists on the remote server
+# user_exists $USER $SERVER
+user_exists()
+{
+  if [ -z "${SERVER}" ]; then
+    echo "cannot perform account verification, no server specified?"
+    return 2
+  else
+    VUSER=${1:-$USER}
+    ssh ${SERVER} "[[ -d /home/${VUSER} ]]"
+    return $?
+  fi
+}
 
-if [ -z "${USER}" ] || [ -z "${SERVER}" ]; then
+
+# Create an account for user on a remote server
+# create_user $USER $SERVER <$PASSWORD>
+create_user()
+{
+  #USER=$1
+  #SERVER=$2
+  for SERVER in ${SERVERS[@]}; do
+    if ! user_exists; then
+      echo "${USER} not found on ${SERVER}, attempting to create."
+      # Make this something interesting for a temporary password
+      # or replace with your favorite password generator
+      PW=$3:"Ch@ngeMe! ${RANDOM} ${USER}"
+
+      $(ssh ${SERVER} "[[ -x /usr/sbin/adduser ]] && exit 42")
+      if [ "$?" = "42" ]; then
+        ssh ${SERVER} "sudo /usr/sbin/adduser --disabled-password ${USER}"
+        echo "Created account for ${USER}@${SERVER}, with disabled password"
+      else
+        ssh ${SERVER} "sudo /usr/sbin/useradd -m --password '${PW}' ${USER}" 
+        echo "Created account for ${USER}@${SERVER}, password set to '${PW}'"
+      fi
+    fi
+  done
+}
+
+# Makes sure all a users keys are found on remote account or adds them
+# ensure_keys user account <server server server server>
+ensure_keys()
+{
+  #USER=$1
+  #ACCT=$2
+  #SERVERS=${@:3}
+
+  if [ -z "${USER}" ]; then
+    echo "Missing user param: ensure_keys <user> <acct> <server server server server>"
+    return 1
+  fi
+  if [ -z "${ACCT}" ]; then
+    echo "Missing acct param: ensure_keys <user> <acct> <server server server server>"
+    return 1
+  fi
+  if [ ${#SERVERS[@]} -eq 0 ]; then
+    echo "Missing server param: ensure_keys <user> <acct> <server server server server>"
+    return 1
+  fi
+
+  OK=true
+  if [ -f "${KEYDIR}/${USER}.pub" ]; then
+    declare -a KEYS
+    # Read users keys into array
+    while read -r KEY; do 
+      if [[ -n "$KEY" ]] && [[ "${KEY:0:1}" != "#" ]]; then
+        KEYS[ ${#KEYS[@]} ]=$KEY
+      fi
+    done <${KEYDIR}/${USER}.pub
+
+    for SERVER in ${SERVERS[@]}; do 
+      declare -i VERIFIED=0
+      echo
+      echo "Verifying ${ACCT} exists on ${SERVER}"
+      if user_exists ${ACCT} ; then
+        ssh ${SERVER} "sudo mkdir -p /home/${ACCT}/.ssh; sudo chown -R ${ACCT} /home/${ACCT}"
+        for ((i=0; i<${#KEYS[@]}; i++)); do 
+          KEY=${KEYS[$i]}
+          echo -n "Ensuring $USER's key ending with '...${KEY:((${#KEY}-25))}' is set up on $ACCT@$SERVER... "
+          ssh ${SERVER} "sudo grep '${KEY}' /home/${ACCT}/.ssh/authorized_keys || echo -e \"# ${USER}'s key added by $(whoami) on $(date)\n${KEY}\"|sudo tee -a  /home/${ACCT}/.ssh/authorized_keys && sudo grep '${KEY}' /home/${ACCT}/.ssh/authorized_keys" >/dev/null
+          if [ $? -eq 0 ]; then
+            echo " (verified setup)"
+            VERIFIED+=1
+          else
+            echo " (Failed with exit ${?})"
+          fi
+        done
+      else
+        echo "${ACCT} does not exist on ${SERVER}"
+      fi
+      echo "Verified ${VERIFIED}/${#KEYS[@]} ${USER}'s keys on ${ACCT}@${SERVER}"
+      if [[ $OK ]] && [[ "${VERIFIED}" -ne "${#KEYS[@]}" ]]; then
+        OK=false
+      fi
+    done
+    if [ $OK ]; then
+      return 0
+    else 
+      return 1
+    fi
+  else
+    echo "No key for user '${USER}' found in ${KEYDIR}"
+    return 2
+  fi
+}
+
+debug_args()
+{
+  echo "USER: $USER"
+  echo "ACCT: $ACCT"
+  if [ ${#GROUP[@]} -gt 0 ]; then
+    echo "GROUPS: ${#GROUP[@]}: ${GROUP[@]}"
+  else
+    echo "GROUPS: none"
+  fi
+  if [ ${#SERVERS[@]} -gt 0 ]; then
+    echo "SERVERS: ${#SERVERS[@]}: ${SERVERS[@]}"
+  else
+    echo "SERVERS: none"
+  fi
+  echo "DOMAIN: ${DOMAIN:-"not specified"}"
+  echo "KEYDIR: ${KEYDIR}"
+  echo "DISABLE: ${DISABLE:-"no"}"
+  echo "ENABLE: ${ENABLE:-"no"}"
+  echo "DELETE: ${DELETE:-"no"}"
+  if [ -z "${DELETE}" ] && [ -z "${DISABLE}" ] && [ "${USER}" == "${ACCT}" ]; then
+    echo "CREATE: yes"
+  else
+    echo "CREATE: no"
+  fi
+}
+
+usage()
+{
   echo
-  echo "USAGE: $0 <user> <server> [disable|delete|enable|addto|group] <addto-user|group-name>"
+  echo "Remote user manager"
   echo
-  echo "without optional 3rd argmuent, will create specified user's account on"
-  echo "the server and add set up their ssh pub key for them if we have it."
+  echo "USAGE: $0 -k keyname -s server,server,server <-der> <-a account> <-g group,group,group> <-p path>"
   echo
-  echo "Currently looking for ssh public keys in: ${KEYDIR}"
-  echo "edit ${0} to change this location"
+  echo "By default, will ensure user account exists and user's keys are present in the authorized_keys file"
   echo
-  echo "optional 3rd argument:"
-  echo "    disable = locks their password and moves their ssh credentials"
-  echo "    enable  = resets their password and moves their ssh credentials back"
-  echo "    delete  = completely removes their account"
-  echo "    addto     = add user's key to account speficied as fourth arg'seauthorized_keys file"
-  echo "    group     = add user to group given as forth argument"
+  echo "REQUIRED params"
+  echo "   -k key/user, keyfile to work with"
+  echo "   -s server, server(s) to work with (comma delimited, no spaces)"
   echo
+  echo "OPTIONAL params:"
+  echo "   -d disable, locks their password and moves their ssh credentials"
+  echo "   -e enable, resets their password and moves their ssh credentials back"
+  echo "   -r remove, completely removes their account"
+
+  echo "   -a account, account name on remote side to add keys to (default: key/user name [-k param])"
+  echo "   -g group, add user to group(s) (comma delimited, no spaces)"
+  echo "   -p keypath, override path to key files (default: ${KEYDIR})"
+  echo "   -n domain, set a domain to be used for servers (which are then assumed to be specified as hosts)"
+  echo "   -h help, you're reading it"
+  echo
+}
+
+
+###########################################################
+# Option Parser
+#
+while getopts ":a:u:g:s:p:n:derhx" opt; do
+  case $opt in
+    # Required opts..
+    a) ACCT=${OPTARG} ;;
+    u) USER=${OPTARG} ;;
+
+    g) # Break group arg into array
+      OLD_IFS="${IFS}"
+      IFS=","
+      GROUP=(${OPTARG})
+      IFS="${OLD_IFS}"
+      ;;
+    s)  # Break group arg into array
+      OLD_IFS="${IFS}"
+      IFS=","
+      SERVERS=(${OPTARG})
+      IFS="${OLD_IFS}"
+      ;;
+    p) KEYDIR=${OPTARG} ;;
+    d) DISABLE=true ;;
+    e) ENABLE=true ;;
+    r) DELETE=true ;;
+    n) DOMAIN=${OPTARG} ;;
+    x) DEBUG=true ;;
+    h) 
+      usage
+      exit
+      ;;
+
+    \?)
+      usage
+      echo
+      echo "Invalid option: -$OPTARG"
+      echo
+      exit 1
+      ;;
+    :)
+      usage
+      echo
+      echo "Option -$OPTARG requires an argument."
+      echo
+      exit 1
+      ;;
+  esac
+done
+OPTIND=1
+if [ -z "${USER}" ] || [ "${#SERVERS[@]}" -eq 0 ]; then
+  usage
+  echo "ERROR: Must specify -u and -s options"
   exit 1
 fi
 
-case "$OPTIONAL" in
-  "");;
-  "delete")
-      echo
-      echo "Please confirm you really do want to DELETE the ${USER} account on ${SERVER}"
-      echo "Note, this removes their home directory as well! You may want to double check that there's nothing in there of importance."
-      read -p "Type 'proceed' to confirm: " confirmation
-      if [ "$confirmation" == "proceed" ]; then
-        echo "ok"
-        ssh ${SERVER} "[[ -d /home/${USER} ]] && sudo /usr/sbin/userdel -rf ${USER}" 
-        ssh ${SERVER} "[[ ! -d /home/${USER} ]] && echo '${USER} deleted.' || echo \"Failed to delete ${USER} on ${SERVER}\""
-      else
-        echo "ok, no harm done."
-      fi
-      exit
-  ;;
-
-  "disable")
-      echo
-      echo "Please confirm I'm not crazy and you really did want to DISABLE the ${USER} account on ${SERVER}"
-      read -p "Type 'yes' to confirm: " confirmation
-      if [ "$confirmation" == "yes" ]; then
-        echo "checking for running processes.. "
-        RUNNING=$(ssh ${SERVER} "sudo pgrep -lfu $USER|wc -l") 
-        if [ "${RUNNING}" != "0" ]; then
-          ssh ${SERVER} "sudo pgrep -lfu $USER" 
-          read -p "Kill these ${RUNNING} running processes? " killem
-          if [ "${killem:0:1}" = [yY] ]; then
-            echo "killing running processes"
-            ssh ${SERVER} "sudo pkill -TERM -u $USER && sleep 5 && sudo pkill -KILL -u $USER" 
-          else
-            echo "leaving the processes alone"
-          fi
-        else
-          echo "none found, good."
-        fi
-
-        ssh ${SERVER} "[[ -d ~${USER}/.ssh ]] && sudo mv -f ~${USER}/.ssh ~${USER}/.ssh_disabled" 
-        ssh ${SERVER} "sudo passwd -l ${USER}" 
-
-        for acct in $ALTERNATE_ACCTS; do
-          [[ "${acct}" = "root" ]] && DIR=/root || DIR=/home/${acct}
-          FOUND=$(ssh ${SERVER} "[[ -d ${DIR} ]]")
-          if [ "$?" = "1" ]; then
-            echo "${DIR} not found on ${SERVER}, skipping"
-            continue
-          fi
-          ALTKEYS=$(ssh ${SERVER} "[[ -f ~${USER}/.ssh_disabled/authorized_keys ]] && sudo grep -f ~${USER}/.ssh_disabled/authorized_keys ${DIR}/.ssh/authorized_keys")
-          if [ "$?" = "0" ]; then
-            echo "Found matching keys in ${DIR}/.ssh/authorized_keys, disabling.."
-            ssh ${SERVER} "sudo grep -vf ~${USER}/.ssh_disabled/authorized_keys ${DIR}/.ssh/authorized_keys |sudo tee ${DIR}/.ssh/${TIME}_auth && \
-                           sudo mv -f ${DIR}/.ssh/authorized_keys ${DIR}/.ssh/authorized_keys_disabled_${USER}_${TIME} && \
-                           sudo mv -f ${DIR}/.ssh/${TIME}_auth ${DIR}/.ssh/authorized_keys" 
-            echo "disabled, moved ${acct}'s original authorized_keys file to ${DIR}/.ssh/authorized_keys_disabled_${USER}_${TIME}"
-          else
-            echo "didn't find any matching keys in ${acct}'s authorized_key file, good. ($?)"
-          fi
-        done
-
-        echo
-        echo "Done! ${USER}'s account on ${SERVER} has been disabled, to re-enable run:"
-        echo
-        echo "${0} ${USER} ${SERVER} enable"
-        echo
-      else
-        echo "ok, left it alone.."
-      fi
-      exit
-  ;;
-
-  "enable")
-     ssh ${SERVER} "[[ -d ~${USER}/.ssh ]] && [[ -d ~${USER}/.ssh_disabled  ]] && sudo mv -f ~${USER}/.ssh ~${USER}/.ssh_${TIME} && echo \"weird, there was an .ssh dir there already, moved to ~${USER}/.ssh_${TIME}\"" 
-     ssh ${SERVER} "[[ -d ~${USER}/.ssh_disabled ]] && sudo mv -f ~${USER}/.ssh_disabled ~${USER}/.ssh"
-     ssh ${SERVER} "sudo usermod --password '${PW}' ${USER}" 
-     echo
-     echo "${USER} account on ${SERVER} re-enabled, password reset to '${PW}'"
-     echo
-     echo "NOTE: leaving it up to you to (re)add keys to any additional accounts if necessary"
-     echo
-     exit
-  ;;
-
-  "add" | "addto" | "auth" | "authorize")
-    echo "Coming soon.."
-    exit
-  ;;
-
-  "group")
-    echo "Coming soon.. ${OPTIONAL_ARGS}"
-    exit
-  ;;
-
-  *)
-    echo "Ignoring ${OPTIONAL} argument, should be 'delete' if you intended to delete user or 'disable' if you intended to disable the account"
-  ;;
-esac
-
-#echo "ssh ${SERVER} \"[[ -d /home/${USER} ]] && exit 3\""
-$(ssh ${SERVER} "[[ -d /home/${USER} ]] && exit 3")
-if [ "$?" = "3" ]; then
-  echo "${USER} already exists on ${SERVER}"
-else
-  echo "${USER} does not appear to exist yet on ${SERVER} ($?)"
-  $(ssh ${SERVER} "[[ -x /usr/sbin/adduser ]] && exit 42")
-  if [ "$?" = "42" ]; then
-    ssh ${SERVER} "sudo /usr/sbin/adduser --disabled-password ${USER}"
-    echo "Created account for ${USER}@${SERVER}, with disabled password"
-  else
-    ssh ${SERVER} "sudo /usr/sbin/useradd -m --password '${PW}' ${USER}" 
-    echo "Created account for ${USER}@${SERVER}, password set to '${PW}'"
-  fi
+if [ -z "${ACCT}" ]; then
+  ACCT=$USER
 fi
 
-if [ -f "${KEYDIR}/${USER}.pub" ]; then
-  echo "Adding their key from ${KEYDIR}/${USER}.pub"
-  cat ${KEYDIR}/${USER}.pub |ssh ${SERVER} "sudo mkdir -p ~${USER}/.ssh; sudo tee -a ~${USER}/.ssh/authorized_keys && echo "" sudo tee -a ~${USER}/.ssh/authorized_keys && sudo chown -R ${USER}:${USER} ~${USER}"
-else
-  echo "No key for ${USER} found in ${KEYDIR}"
+if [ -n "${DOMAIN}" ]; then
+  #echo "Appending ${DOMAIN} domain onto each server in ${SERVERS[@]}"
+  for ((i=0; i < ${#SERVERS[@]}; i++)); do
+    SERVERS[$i]="${SERVERS[$i]}.${DOMAIN}"
+  done
+fi
+
+if [ -n "${DEBUG}" ]; then
+  debug_args
+  exit
+fi
+
+# The business.. 
+
+# Delete option, no need to create/setup keys etc if we intend to delete the user
+if [ -n "${DELETE}" ]; then
+  echo "Please confirm you really do want to DELETE the ${USER} account on ${SERVERS[@]}"
+  echo "Note, this removes their home directory as well! You may want to double check that there's nothing in there of importance."
+  read -p "Type 'proceed' to confirm: " confirmation
+  if [ "$confirmation" == "proceed" ]; then
+    for SERVER in ${SERVERS[@]}; do 
+      echo "Removing ${USER} from ${SERVER}..."
+      # TODO: also verify user removed from groups
+      # TODO: also verify user's keys removed from all auth files
+      ssh ${SERVER} "[[ -d /home/${USER} ]] && sudo /usr/sbin/userdel -rf ${USER}" 
+      ssh ${SERVER} "[[ ! -d /home/${USER} ]] && echo '${USER} deleted.' || echo \"Failed to delete ${USER} on ${SERVER}\""
+    done
+    echo "Finished. Note, you may wish to confirm the user's keys are not present on any accounts and the user is no longer present in any groups"
+  else
+    echo "ok, no harm done."
+  fi
+  exit
+fi
+
+# Disable account option
+if [ -n "${DISABLE}" ]; then
+  echo
+  echo "Please confirm I'm not crazy and you really did want to DISABLE the ${USER} account on ${SERVERS[@]}"
+  read -p "Type 'yes' to confirm: " confirmation
+  if [ "$confirmation" == "yes" ]; then
+    echo "checking for running processes.. "
+    for SERVER in ${SERVERS[@]}; do
+      RUNNING=$(ssh ${SERVER} "sudo pgrep -lfu $USER|wc -l") 
+      if [ "${RUNNING}" != "0" ]; then
+        ssh ${SERVER} "sudo pgrep -lfu $USER" 
+        read -p "Kill these ${RUNNING} running processes? " killem
+        if [ "${killem:0:1}" = [yY] ]; then
+          echo "killing running processes"
+          ssh ${SERVER} "sudo pkill -TERM -u $USER && sleep 5 && sudo pkill -KILL -u $USER" 
+        else
+          echo "leaving the processes alone"
+        fi
+      else
+        echo "none found, good."
+      fi
+
+      ssh ${SERVER} "[[ -d ~${USER}/.ssh ]] && sudo mv -f ~${USER}/.ssh ~${USER}/.ssh_disabled" 
+      ssh ${SERVER} "sudo passwd -l ${USER}" 
+
+      # TODO: allow $ACCT to be array of accounts to check?
+      for acct in $ALTERNATE_ACCTS; do
+        [[ "${acct}" = "root" ]] && DIR=/root || DIR=/home/${acct}
+        FOUND=$(ssh ${SERVER} "[[ -d ${DIR} ]]")
+        if [ "$?" = "1" ]; then
+          echo "${DIR} not found on ${SERVER}, skipping"
+          continue
+        fi
+        ALTKEYS=$(ssh ${SERVER} "[[ -f ~${USER}/.ssh_disabled/authorized_keys ]] && sudo grep -f ~${USER}/.ssh_disabled/authorized_keys ${DIR}/.ssh/authorized_keys")
+        if [ "$?" = "0" ]; then
+          echo "Found matching keys in ${DIR}/.ssh/authorized_keys, disabling.."
+          ssh ${SERVER} "sudo grep -vf ~${USER}/.ssh_disabled/authorized_keys ${DIR}/.ssh/authorized_keys |sudo tee ${DIR}/.ssh/${TIME}_auth && \
+                         sudo mv -f ${DIR}/.ssh/authorized_keys ${DIR}/.ssh/authorized_keys_disabled_${USER}_${TIME} && \
+                         sudo mv -f ${DIR}/.ssh/${TIME}_auth ${DIR}/.ssh/authorized_keys" 
+          echo "disabled, moved ${acct}'s original authorized_keys file to ${DIR}/.ssh/authorized_keys_disabled_${USER}_${TIME}"
+        else
+          echo "didn't find any matching keys in ${acct}'s authorized_key file, good. ($?)"
+        fi
+      done
+    done
+    echo
+    echo "Done! ${USER}'s account on ${SERVERS[@]} has been disabled, use the -e option to re-enable"
+    echo
+  else
+    echo "confirmation failed, left intact.."
+  fi
+  exit
+fi
+
+# Only attempt to create remote account if it's the same as the
+# account we intend to authorize, eg: don't attempt to create an account 
+# for larry if we only want to add larry's key to sam's account and also
+# don't attempt to create sam's account if it does not exist. 
+if [ "${USER}" = "${ACCT}" ]; then
+  echo "Ensuring ${USER} has account on ${SERVERS[@]}"
+  create_user
+fi
+
+# Ensure user's keys are all set up
+ensure_keys
+
+# Re-enable disabled user
+if [ -n "${ENABLE}" ]; then
+  PW=$3:"Ch@ngeMe! ${RANDOM} ${USER}"
+  for SERVER in ${SERVERS[@]}; do
+    ssh ${SERVER} "[[ -d ~${USER}/.ssh ]] && [[ -d ~${USER}/.ssh_disabled  ]] && sudo mv -f ~${USER}/.ssh ~${USER}/.ssh_${TIME} && echo \"weird, there was an .ssh dir there already, moved to ~${USER}/.ssh_${TIME}\"" 
+    ssh ${SERVER} "[[ -d ~${USER}/.ssh_disabled ]] && sudo mv -f ~${USER}/.ssh_disabled ~${USER}/.ssh"
+    ssh ${SERVER} "sudo usermod --password '${PW}' ${USER}" 
+    echo
+    echo "${USER} account on ${SERVER} re-enabled, password reset to '${PW}'"
+    echo
+    echo "NOTE: leaving it up to you to (re)add keys to any additional accounts if necessary"
+    echo
+  done
+fi
+
+# Add user to group(s)
+if [ "${#GROUP[@]}" -gt 0 ]; then
+  COMMAND=""
+  for GROUP in ${GROUP[@]}; do
+    COMMAND+="sudo adduser ${USER} ${GROUP};"
+  done
+  for SERVER in ${SERVERS[@]}; do
+    echo
+    echo "Adding ${USER} to ${GROUP[@]} groups on ${SERVER}"
+    ssh ${SERVER} "${COMMAND}"
+  done
 fi
 
