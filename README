@@ -1,17 +1,26 @@
-Just a simple bash script for now.. 
+Just a simple bash script to help manage users on remote hosts
 
-$ ./remote 
+$ ./remote
 
-USAGE: ./remote <user> <server> [disable|delete|enable]
+Remote user manager
 
-without optional 3rd argmuent, will create specified user's account on
-the server and add set up their ssh pub key for them if we have it.
+USAGE: ./remote -k keyname -s server,server,server <-der> <-a account> <-g group,group,group> <-p path>
 
-Currently looking for ssh public keys in: ~/keys
-edit ./remote to change this location
+By default, will ensure user account exists and user's keys are present in the authorized_keys file
 
-optional 3rd argument:
-    disable = locks their password and moves their ssh credentials
-    enable  = resets their password and moves their ssh credentials back
-    delete  = completely removes their account
+REQUIRED params
+   -k key/user, keyfile to work with
+   -s server, server(s) to work with (comma delimited, no spaces)
+
+OPTIONAL params:
+   -d disable, locks their password and moves their ssh credentials
+   -e enable, resets their password and moves their ssh credentials back
+   -r remove, completely removes their account
+   -a account, account name on remote side to add keys to (default: key/user name [-k param])
+   -g group, add user to group(s) (comma delimited, no spaces)
+   -p keypath, override path to key files (default: /home/mike/keys)
+   -n domain, set a domain to be used for servers (which are then assumed to be specified as hosts)
+   -h help, you're reading it
+
+
 
