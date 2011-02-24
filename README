@@ -1,15 +1,21 @@
 Just a simple bash script to help manage users on remote hosts
 
 $ ./remote
+Remote User Manager
 
-Remote user manager
+USAGE: ./remote -u username -s server,server,server <-der> <-a account> <-g group,group,group> <-p path>
 
-USAGE: ./remote -k keyname -s server,server,server <-der> <-a account> <-g group,group,group> <-p path>
+  By default, will ensure user account exists and user's keys are present
+  in the authorized_keys file. It expects to find the user's key in the
+  keypath (~/keys by default, override with -p) and be named following a
+  <user>.pub naming convention.
 
-By default, will ensure user account exists and user's keys are present in the authorized_keys file
+Presumptions:
+ * You can ssh into the server(s) you wish to manage users on
+ * You are allowed to use sudo on the server(s) you wish to manage users on
 
 REQUIRED params
-   -k key/user, keyfile to work with
+   -u key/user, user keyfile to work with
    -s server, server(s) to work with (comma delimited, no spaces)
 
 OPTIONAL params:
@@ -22,5 +28,25 @@ OPTIONAL params:
    -n domain, set a domain to be used for servers (which are then assumed to be specified as hosts)
    -h help, you're reading it
 
+
+
+Example Usage:
+
+# Create user for larry on foo.bar.com and baz.bar.com if it don't exist, add their public ssh key(s) to account if they aren't already
+./remote -u larry -s foo.bar.com,baz.bar.com
+# or.. 
+./remote -u larry -s foo,baz -n bar.com
+
+# Do the same, but also add larry to the dev and ops groups
+./remote -u larry -s foo,baz -n bar.com -g dev,ops
+
+# Disable larry's accounts, preventing him from logging in
+./remote -u larry -s foo.bar.com -d
+
+# Re-enable larry's accounts, allowing him access again
+./remote -u larry -s foo.bar.com -e
+
+# Completely remove larry from the system(s)
+./remote -u larry -s foo.bar.com -r
 
 

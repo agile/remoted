@@ -153,14 +153,21 @@ debug_args()
 usage()
 {
   echo
-  echo "Remote user manager"
+  echo "Remote User Manager"
   echo
-  echo "USAGE: $0 -k keyname -s server,server,server <-der> <-a account> <-g group,group,group> <-p path>"
+  echo "USAGE: $0 -u username -s server,server,server <-der> <-a account> <-g group,group,group> <-p path>"
   echo
-  echo "By default, will ensure user account exists and user's keys are present in the authorized_keys file"
+  echo "  By default, will ensure user account exists and user's keys are present"
+  echo "  in the authorized_keys file. It expects to find the user's key in the"
+  echo "  keypath (~/keys by default, override with -p) and be named following a"
+  echo "  <user>.pub convention."
+  echo
+  echo "Presumptions:"
+  echo " * You can ssh into the server(s) you wish to manage users on"
+  echo " * You are allowed to use sudo on the server(s) you wish to manage users on"
   echo
   echo "REQUIRED params"
-  echo "   -k key/user, keyfile to work with"
+  echo "   -u key/user, user keyfile to work with"
   echo "   -s server, server(s) to work with (comma delimited, no spaces)"
   echo
   echo "OPTIONAL params:"
